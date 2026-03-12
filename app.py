@@ -2,7 +2,6 @@ import os
 import streamlit as st
 import numpy as np
 from PIL import Image
-import pickle
 
 st.set_page_config(page_title="Brain Tumor Classification", page_icon="🧠", layout="centered")
 
@@ -10,32 +9,21 @@ st.set_page_config(page_title="Brain Tumor Classification", page_icon="🧠", la
 def load_model():
     try:
         import onnxruntime as ort
-
         model_path = 'resnet_model.onnx'
         if not os.path.exists(model_path):
             st.error(f"❌ File {model_path} tidak ditemukan")
             return None
-
         session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
-
-        scaler = None
-        if os.path.exists('scaler_resnet.pkl'):
-            with open('scaler_resnet.pkl', 'rb') as f:
-                scaler = pickle.load(f)
-
-        return session, scaler
-
+        return session
     except Exception as e:
         st.error(f"⚠️ Error: {e}")
         return None
 
 CLASS_NAMES = {0: "Glioma", 1: "Meningioma", 2: "No Tumor", 3: "Pituitary"}
 
-result = load_model()
+session = load_model()
 
-if result:
-    session, scaler = result
-
+if session:
     st.title("🧠 Klasifikasi Tumor Otak MRI")
     st.markdown("Dashboard Skripsi: **ResNet50**")
     st.markdown("---")
@@ -55,9 +43,6 @@ if result:
 
                     input_name = session.get_inputs()[0].name
                     output = session.run(None, {input_name: img_batch})[0]
-
-                    if scaler is not None and output.shape[-1] != len(CLASS_NAMES):
-                        output = scaler.transform(output)
 
                     pred_idx = int(np.argmax(output[0]))
                     confidence = float(np.max(output[0])) * 100
