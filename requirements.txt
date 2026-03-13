@@ -5,4 +5,4 @@ pillow
 numpy
 keras
 onnxruntime
-fpdf
+fpdf==1.7.2
