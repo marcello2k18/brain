@@ -488,43 +488,40 @@ if uploaded_files:
             row_items = all_results[row_start:row_start + ncols]
             cols = st.columns(ncols, gap="medium")
             for col_idx, res in enumerate(row_items):
-                is_tumor = res['label'].lower() != 'no tumor'
-                tumor_cls = "tumor" if is_tumor else ""
+                is_tumor = res["label"].lower() != "no tumor"
+                accent = "#FC8181" if is_tumor else "#63B3ED"
                 with cols[col_idx]:
-                    # Tab: Original | Saliency
-                    tab1, tab2 = st.tabs(["Original", "Saliency Map"])
-                    with tab1:
-                        st.image(res['image'], use_container_width=True)
-                    with tab2:
-                        st.image(res['saliency'], use_container_width=True, caption="Activation heatmap")
-
-                    # Result card
-                    bars_html = ""
-                    for ci, prob in enumerate(res['probs']):
-                        name = CLASS_NAMES.get(ci, f"C{ci}")
-                        pct = prob * 100
-                        bar_cls = "tumor" if ci == int(np.argmax(res['probs'])) and is_tumor else ""
-                        bars_html += f"""
-                        <div class="prob-row">
-                            <div class="prob-name">{name}</div>
-                            <div class="prob-bar-bg">
-                                <div class="prob-bar-fill {bar_cls}" style="width:{pct:.1f}%"></div>
-                            </div>
-                            <div class="prob-val">{pct:.1f}%</div>
-                        </div>"""
-
+                    # Header card
                     st.markdown(f"""
-                    <div class="scan-result {tumor_cls}">
-                        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;">
+                    <div class="scan-result {'tumor' if is_tumor else ''}">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
                             <div>
-                                <div class="result-label {tumor_cls}">{res['label'].upper()}</div>
-                                <div class="result-meta">{res['filename'][:28]}</div>
+                                <div class="result-label {'tumor' if is_tumor else ''}">{res["label"].upper()}</div>
+                                <div class="result-meta">{res["filename"][:30]}</div>
                             </div>
-                            <div class="result-confidence {tumor_cls}">{res['confidence']:.1f}%</div>
+                            <div class="result-confidence {'tumor' if is_tumor else ''}">{res["confidence"]:.1f}%</div>
                         </div>
-                        {bars_html}
                     </div>
                     """, unsafe_allow_html=True)
+
+                    # Images: Original | Saliency
+                    tab1, tab2 = st.tabs(["📷 Original", "🔥 Saliency Map"])
+                    with tab1:
+                        st.image(res["image"], use_container_width=True)
+                    with tab2:
+                        st.image(res["saliency"], use_container_width=True)
+
+                    # Prob bars — pure streamlit, no HTML
+                    for ci, prob in enumerate(res["probs"]):
+                        name = CLASS_NAMES.get(ci, f"C{ci}")
+                        pct = prob * 100
+                        is_top = ci == int(np.argmax(res["probs"]))
+                        col_a, col_b = st.columns([3, 1])
+                        with col_a:
+                            st.progress(min(pct / 100, 1.0))
+                        with col_b:
+                            color = accent if is_top else "rgba(201,209,224,0.4)"
+                            st.markdown(f"<div style='font-family:monospace;font-size:11px;color:{color};padding-top:6px'>{name}<br><b>{pct:.1f}%</b></div>", unsafe_allow_html=True)
 
         st.markdown("<hr class='neo-divider'>", unsafe_allow_html=True)
 
