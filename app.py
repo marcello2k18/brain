@@ -343,11 +343,49 @@ def load_model():
 def preprocess(image: Image.Image) -> np.ndarray:
     img = image.resize((224, 224))
     arr = np.array(img).astype('float32')
-    arr = arr[:, :, ::-1]      # RGB → BGR
-    arr[:, :, 0] -= 103.939    # ImageNet mean
+    arr = arr[:, :, ::-1]
+    arr[:, :, 0] -= 103.939
     arr[:, :, 1] -= 116.779
     arr[:, :, 2] -= 123.68
     return np.expand_dims(arr, axis=0)
+
+def generate_saliency(session, image: Image.Image, pred_class: int) -> Image.Image:
+    """Occlusion-based saliency map — kompatibel dengan ONNX."""
+    inp_name = session.get_inputs()[0].name
+    base_batch = preprocess(image)
+    base_score = float(session.run(None, {inp_name: base_batch})[0][0][pred_class])
+
+    H, W = 224, 224
+    stride = 16
+    patch  = 32
+    saliency = np.zeros((H, W), dtype=np.float32)
+
+    for y in range(0, H, stride):
+        for x in range(0, W, stride):
+            occ = base_batch.copy()
+            y1, y2 = y, min(y + patch, H)
+            x1, x2 = x, min(x + patch, W)
+            occ[0, y1:y2, x1:x2, :] = 0
+            score = float(session.run(None, {inp_name: occ})[0][0][pred_class])
+            drop = base_score - score
+            saliency[y1:y2, x1:x2] = np.maximum(saliency[y1:y2, x1:x2], drop)
+
+    # Normalize
+    s_min, s_max = saliency.min(), saliency.max()
+    if s_max > s_min:
+        saliency = (saliency - s_min) / (s_max - s_min)
+
+    # Colormap: black→blue→cyan→green→yellow→red
+    r = np.clip(saliency * 3 - 1, 0, 1)
+    g = np.clip(saliency * 3 - 0.5, 0, 1) * np.clip(2 - saliency * 3, 0, 1)
+    b = np.clip(1 - saliency * 2, 0, 1)
+    heatmap = (np.stack([r, g, b], axis=-1) * 255).astype(np.uint8)
+    heatmap_img = Image.fromarray(heatmap).resize(image.size, Image.BILINEAR)
+
+    # Blend dengan original
+    orig = image.convert('RGB')
+    blended = Image.blend(orig, heatmap_img, alpha=0.55)
+    return blended
 
 CLASS_NAMES = {0: "Glioma", 1: "Meningioma", 2: "No Tumor", 3: "Pituitary"}
 
@@ -399,21 +437,26 @@ if uploaded_files:
         all_results = []
         t_start = time.time()
 
-        with st.spinner("Processing neural inference pipeline..."):
-            for f in uploaded_files:
-                img = Image.open(f).convert('RGB')
-                batch = preprocess(img)
-                inp = session.get_inputs()[0].name
-                out = session.run(None, {inp: batch})[0]
-                idx = int(np.argmax(out[0]))
-                conf = float(np.max(out[0])) * 100
-                all_results.append({
-                    'image': img,
-                    'filename': f.name,
-                    'label': CLASS_NAMES.get(idx, f"Class {idx}"),
-                    'confidence': conf,
-                    'probs': out[0].tolist()
-                })
+        progress_bar = st.progress(0, text="Initializing...")
+        for fi, f in enumerate(uploaded_files):
+            progress_bar.progress((fi) / n, text=f"Processing {f.name}...")
+            img = Image.open(f).convert('RGB')
+            batch = preprocess(img)
+            inp = session.get_inputs()[0].name
+            out = session.run(None, {inp: batch})[0]
+            pred_idx = int(np.argmax(out[0]))
+            conf = float(np.max(out[0])) * 100
+            saliency_img = generate_saliency(session, img, pred_idx)
+            all_results.append({
+                'image': img,
+                'saliency': saliency_img,
+                'filename': f.name,
+                'label': CLASS_NAMES.get(pred_idx, f"Class {pred_idx}"),
+                'confidence': conf,
+                'probs': out[0].tolist()
+            })
+            progress_bar.progress((fi + 1) / n, text=f"Done: {f.name}")
+        progress_bar.empty()
 
         t_total = time.time() - t_start
 
@@ -440,41 +483,48 @@ if uploaded_files:
         st.markdown("<hr class='neo-divider'>", unsafe_allow_html=True)
 
         # ── RESULTS GRID ──
-        cols = st.columns(min(n, 3), gap="medium")
-        for i, res in enumerate(all_results):
-            is_tumor = res['label'].lower() != 'no tumor'
-            tumor_cls = "tumor" if is_tumor else ""
-            with cols[i % min(n, 3)]:
-                # Image
-                st.image(res['image'], use_container_width=True)
+        ncols = min(n, 3)
+        for row_start in range(0, len(all_results), ncols):
+            row_items = all_results[row_start:row_start + ncols]
+            cols = st.columns(ncols, gap="medium")
+            for col_idx, res in enumerate(row_items):
+                is_tumor = res['label'].lower() != 'no tumor'
+                tumor_cls = "tumor" if is_tumor else ""
+                with cols[col_idx]:
+                    # Tab: Original | Saliency
+                    tab1, tab2 = st.tabs(["Original", "Saliency Map"])
+                    with tab1:
+                        st.image(res['image'], use_container_width=True)
+                    with tab2:
+                        st.image(res['saliency'], use_container_width=True, caption="Activation heatmap")
 
-                # Result card
-                st.markdown(f"""
-                <div class="scan-result {tumor_cls}">
-                    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;">
-                        <div>
-                            <div class="result-label {tumor_cls}">{res['label'].upper()}</div>
-                            <div class="result-meta">{res['filename'][:28]}</div>
-                        </div>
-                        <div class="result-confidence {tumor_cls}">{res['confidence']:.1f}%</div>
-                    </div>
-                """, unsafe_allow_html=True)
+                    # Result card
+                    bars_html = ""
+                    for ci, prob in enumerate(res['probs']):
+                        name = CLASS_NAMES.get(ci, f"C{ci}")
+                        pct = prob * 100
+                        bar_cls = "tumor" if ci == int(np.argmax(res['probs'])) and is_tumor else ""
+                        bars_html += f"""
+                        <div class="prob-row">
+                            <div class="prob-name">{name}</div>
+                            <div class="prob-bar-bg">
+                                <div class="prob-bar-fill {bar_cls}" style="width:{pct:.1f}%"></div>
+                            </div>
+                            <div class="prob-val">{pct:.1f}%</div>
+                        </div>"""
 
-                # Probability bars
-                for ci, prob in enumerate(res['probs']):
-                    name = CLASS_NAMES.get(ci, f"C{ci}")
-                    pct = prob * 100
-                    bar_cls = "tumor" if name.lower() != 'no tumor' and ci == int(np.argmax(res['probs'])) else ""
                     st.markdown(f"""
-                    <div class="prob-row">
-                        <div class="prob-name">{name}</div>
-                        <div class="prob-bar-bg">
-                            <div class="prob-bar-fill {bar_cls}" style="width:{pct:.1f}%"></div>
+                    <div class="scan-result {tumor_cls}">
+                        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;">
+                            <div>
+                                <div class="result-label {tumor_cls}">{res['label'].upper()}</div>
+                                <div class="result-meta">{res['filename'][:28]}</div>
+                            </div>
+                            <div class="result-confidence {tumor_cls}">{res['confidence']:.1f}%</div>
                         </div>
-                        <div class="prob-val">{pct:.1f}%</div>
+                        {bars_html}
                     </div>
                     """, unsafe_allow_html=True)
-                st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("<hr class='neo-divider'>", unsafe_allow_html=True)
 
