@@ -5,3 +5,4 @@ pillow
 numpy
 keras
 onnxruntime
+fpdf
